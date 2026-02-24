@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import List, Literal, Optional, Union, overload
 
 from selectolax.lexbor import LexborHTMLParser, LexborNode
+from playwright.async_api import ProxySettings
 
 from .decoder import DecodedResult, ResultDecoder
 from .schema import Flight, Result
@@ -12,6 +13,7 @@ from .filter import TFSData
 from .fallback_playwright import fallback_playwright_fetch
 from .bright_data_fetch import bright_data_fetch
 from .primp import Client, Response
+from .cookies_impl import Cookies
 
 
 DataSource = Literal["html", "js"]
@@ -23,14 +25,29 @@ class PlaywrightConfig:
 
     Args:
         url: WebSocket endpoint (ws:// or wss://) for remote Playwright instance.
+        proxy: Optional proxy configuration with server, username, password.
     """
 
     url: str
+    proxy: Optional[ProxySettings] = None
 
 
-def fetch(params: dict) -> Response:
-    client = Client(impersonate="chrome_126", verify=False)
-    res = client.get("https://www.google.com/travel/flights", params=params)
+@dataclass
+class PrimpConfig:
+    """Configuration for primp HTTP client.
+
+    Args:
+        proxy: Optional proxy URL string (e.g., "socks5://127.0.0.1:9150",
+               "http://user:pass@proxy:8080").
+    """
+    proxy: Optional[str] = None
+
+
+def fetch(params: dict, primp_config: Optional[PrimpConfig] = None, impersonate: str = "chrome_128") -> Response:
+    proxy = primp_config.proxy if primp_config else None
+    cookies = Cookies.new(locale="en").to_dict()
+    client = Client(impersonate=impersonate, verify=False, proxy=proxy)
+    res = client.get("https://www.google.com/travel/flights", params=params, cookies=cookies)
     assert res.status_code == 200, f"{res.status_code} Result: {res.text_markdown}"
     return res
 
@@ -45,6 +62,7 @@ def get_flights_from_filter(
     ] = "common",
     data_source: Literal["js"] = ...,
     playwright_config: Optional[PlaywrightConfig] = None,
+    primp_config: Optional[PrimpConfig] = None,
 ) -> Union[DecodedResult, None]: ...
 
 
@@ -58,6 +76,7 @@ def get_flights_from_filter(
     ] = "common",
     data_source: Literal["html"],
     playwright_config: Optional[PlaywrightConfig] = None,
+    primp_config: Optional[PrimpConfig] = None,
 ) -> Result: ...
 
 
@@ -70,6 +89,7 @@ def get_flights_from_filter(
     ] = "common",
     data_source: DataSource = "html",
     playwright_config: Optional[PlaywrightConfig] = None,
+    primp_config: Optional[PrimpConfig] = None,
 ) -> Union[Result, DecodedResult, None]:
     data = filter.as_b64()
 
@@ -81,34 +101,44 @@ def get_flights_from_filter(
     }
 
     if mode in {"common", "fallback"}:
-        try:
-            res = fetch(params)
-        except AssertionError as e:
+        res = None
+        last_primp_error = None
+        for fingerprint in ["chrome_128", "safari_17.5"]:
+            try:
+                res = fetch(params, primp_config, impersonate=fingerprint)
+                break
+            except AssertionError as e:
+                last_primp_error = e
+
+        if res is None:
             if mode == "fallback":
                 playwright_url = playwright_config.url if playwright_config else None
-                res = fallback_playwright_fetch(params, playwright_url)
+                proxy = playwright_config.proxy if playwright_config else None
+                res = fallback_playwright_fetch(params, playwright_url, proxy)
             else:
-                raise e
+                raise last_primp_error
 
     elif mode == "local":
         from .local_playwright import local_playwright_fetch
 
         playwright_url = playwright_config.url if playwright_config else None
-        res = local_playwright_fetch(params, playwright_url)
+        proxy = playwright_config.proxy if playwright_config else None
+        res = local_playwright_fetch(params, playwright_url, proxy)
 
     elif mode == "bright-data":
         res = bright_data_fetch(params)
 
     else:
         playwright_url = playwright_config.url if playwright_config else None
-        res = fallback_playwright_fetch(params, playwright_url)
+        proxy = playwright_config.proxy if playwright_config else None
+        res = fallback_playwright_fetch(params, playwright_url, proxy)
 
     try:
         return parse_response(res, data_source)
     except RuntimeError as e:
         if mode == "fallback":
             return get_flights_from_filter(
-                filter, mode="force-fallback", playwright_config=playwright_config
+                filter, mode="force-fallback", playwright_config=playwright_config, primp_config=primp_config
             )
         raise e
 
@@ -125,6 +155,7 @@ def get_flights(
     max_stops: Optional[int] = None,
     data_source: DataSource = "html",
     playwright_config: Optional[PlaywrightConfig] = None,
+    primp_config: Optional[PrimpConfig] = None,
 ) -> Union[Result, DecodedResult, None]:
     return get_flights_from_filter(
         TFSData.from_interface(
@@ -137,7 +168,52 @@ def get_flights(
         mode=fetch_mode,
         data_source=data_source,
         playwright_config=playwright_config,
+        primp_config=primp_config,
     )
+
+
+async def async_get_flights_with_page(
+    *,
+    flight_data: List[FlightData],
+    trip: Literal["round-trip", "one-way", "multi-city"],
+    passengers: Passengers,
+    seat: Literal["economy", "premium-economy", "business", "first"],
+    max_stops: Optional[int] = None,
+    data_source: DataSource = "html",
+    playwright_page=None,
+) -> Union[Result, DecodedResult, None]:
+    """Async entry point that uses a pre-acquired Playwright page.
+
+    This function is designed for use with a PlaywrightContextPool.
+    It skips primp and uses the provided page directly for fetching.
+    """
+    from .local_playwright import fetch_with_playwright_page
+
+    tfs = TFSData.from_interface(
+        flight_data=flight_data,
+        trip=trip,
+        passengers=passengers,
+        seat=seat,
+        max_stops=max_stops,
+    )
+    data = tfs.as_b64()
+    params = {
+        "tfs": data.decode("utf-8"),
+        "hl": "en",
+        "tfu": "EgQIABABIgA",
+    }
+    url = "https://www.google.com/travel/flights?" + "&".join(
+        f"{k}={v}" for k, v in params.items()
+    )
+
+    body = await fetch_with_playwright_page(playwright_page, url)
+
+    class DummyResponse:
+        status_code = 200
+        text = body
+        text_markdown = body
+
+    return parse_response(DummyResponse(), data_source)
 
 
 def parse_response(

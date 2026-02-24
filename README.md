@@ -59,7 +59,7 @@ flight.price
 
 ### Using Playwright with Docker Container
 
-First, run a Playwright browser server in Docker:
+First, run a Playwright browser server in Docker (note: playwright image must be the same as the client version)
 
 ```bash
 docker run -it --rm -p 3000:3000 mcr.microsoft.com/playwright:v1.53.0-noble /bin/bash -c "cd /home/pwuser && npx playwright install && npx -y playwright@1.53.0 run-server --port=3000"

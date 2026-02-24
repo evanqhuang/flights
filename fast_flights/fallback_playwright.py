@@ -1,5 +1,6 @@
 from typing import Any, Optional
 
+from playwright.async_api import ProxySettings
 from .primp import Client
 
 CODE = """\
@@ -26,21 +27,22 @@ asyncio.run(main())
 """
 
 
-def fallback_playwright_fetch(params: dict, playwright_url: Optional[str] = None) -> Any:
+def fallback_playwright_fetch(params: dict, playwright_url: Optional[str] = None, proxy: Optional[ProxySettings] = None) -> Any:
     """
     Fetch Google Flights data using try.playwright.tech service or local playwright.
-    
+
     Args:
         params: Query parameters for the Google Flights URL
         playwright_url: WebSocket endpoint for remote Playwright. If provided, uses local playwright instead of try.playwright.tech
-    
+        proxy: Optional proxy configuration dict with 'server', 'username', 'password' keys.
+
     Returns:
         DummyResponse object with fetched content
     """
     if playwright_url:
         # Use local playwright with the specified URL
         from .local_playwright import local_playwright_fetch
-        return local_playwright_fetch(params, playwright_url)
+        return local_playwright_fetch(params, playwright_url, proxy)
     
     # Original fallback behavior using try.playwright.tech
     client = Client(impersonate="chrome_100", verify=False)
