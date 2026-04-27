@@ -106,6 +106,58 @@ def get_flights(
     )
 
 
+_DAY_ABBREVS = {
+    'Monday': 'Mon', 'Tuesday': 'Tue', 'Wednesday': 'Wed',
+    'Thursday': 'Thu', 'Friday': 'Fri', 'Saturday': 'Sat', 'Sunday': 'Sun',
+}
+_MONTH_ABBREVS = {
+    'January': 'Jan', 'February': 'Feb', 'March': 'Mar', 'April': 'Apr',
+    'May': 'May', 'June': 'Jun', 'July': 'Jul', 'August': 'Aug',
+    'September': 'Sep', 'October': 'Oct', 'November': 'Nov', 'December': 'Dec',
+}
+
+
+def _shorten_date(date_str: str) -> str:
+    """Convert 'Sunday, February 15' to 'Sun, Feb 15'."""
+    for full, abbr in _DAY_ABBREVS.items():
+        date_str = date_str.replace(full, abbr)
+    for full, abbr in _MONTH_ABBREVS.items():
+        date_str = date_str.replace(full, abbr)
+    return date_str
+
+
+def _parse_aria_label(label: str) -> dict:
+    """Extract flight fields from aria-label when CSS selectors fail.
+
+    Google always includes structured flight data in aria-label attributes
+    regardless of how it obfuscates CSS class names per browser fingerprint.
+    """
+    result = {}
+    m = re.search(r'flight with (.+?)\.\s*Leaves', label)
+    result['name'] = m.group(1) if m else ""
+    m = re.search(r'Leaves .+ at (\d+:\d+\s*(?:AM|PM)) on (.+?) and arrives', label)
+    if m:
+        time_str, date_str = m.group(1), m.group(2)
+        result['departure'] = f"{re.sub(r'\\s+', ' ', time_str)} on {_shorten_date(date_str)}"
+    else:
+        result['departure'] = ""
+    m = re.search(r'arrives .+ at (\d+:\d+\s*(?:AM|PM)) on (.+?)\.\s*Total', label)
+    if m:
+        time_str, date_str = m.group(1), m.group(2)
+        result['arrival'] = f"{re.sub(r'\\s+', ' ', time_str)} on {_shorten_date(date_str)}"
+    else:
+        result['arrival'] = ""
+    m = re.search(r'Total duration (.+?)\.', label)
+    result['duration'] = m.group(1) if m else ""
+    m = re.search(r'(Nonstop|\d+ stops?)\s+flight', label)
+    if m:
+        stops_text = m.group(1)
+        result['stops'] = 0 if stops_text == "Nonstop" else int(stops_text.split()[0])
+    else:
+        result['stops'] = "Unknown"
+    return result
+
+
 def parse_response(
     r: Response,
     data_source: DataSource,
@@ -177,6 +229,28 @@ def parse_response(
                 stops_fmt = 0 if stops == "Nonstop" else int(stops.split(" ", 1)[0])
             except ValueError:
                 stops_fmt = "Unknown"
+
+            # Fallback: if CSS selectors missed any key fields, parse from aria-label.
+            # Google obfuscates class names differently per browser fingerprint, but
+            # aria-label always contains structured flight data.
+            if not name or not departure_time or not arrival_time or not duration or stops_fmt == "Unknown":
+                aria = item.attributes.get("aria-label", "") or ""
+                if not aria or "flight" not in aria:
+                    aria_el = item.css_first("[aria-label*='flight']")
+                    if aria_el:
+                        aria = aria_el.attributes.get("aria-label", "") or ""
+                if aria and "flight" in aria:
+                    parsed = _parse_aria_label(aria)
+                    if not name:
+                        name = parsed.get('name', '')
+                    if not departure_time:
+                        departure_time = parsed.get('departure', '')
+                    if not arrival_time:
+                        arrival_time = parsed.get('arrival', '')
+                    if not duration:
+                        duration = parsed.get('duration', '')
+                    if stops_fmt == "Unknown":
+                        stops_fmt = parsed.get('stops', 'Unknown')
 
             flights.append(
                 {
